@@ -1,0 +1,87 @@
+name: main
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.7.1
+
+      - name: Trova il progetto (zip nella radice oppure cartella normale)
+        id: proj
+        run: |
+          Z=$(ls TheShadow*.zip 2>/dev/null | head -n1 || true)
+          if [ -n "$Z" ]; then
+            mkdir -p _src && unzip -q -o "$Z" -d _src
+            D=$(dirname "$(find _src -name build.gradle | head -n1)")
+          elif [ -f build.gradle ]; then
+            D=.
+          else
+            echo "Nessun progetto trovato: carica TheShadow-FabricMod.zip nella radice del repo"; exit 1
+          fi
+          echo "dir=$D" >> "$GITHUB_OUTPUT"
+          echo "Progetto in: $D"
+
+      - name: Loom aggiornato e ultima versione di Fabric API
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          # Loom 1.18.2 = la versione usata dalle mod uscite per Minecraft 26.3
+          sed -i 's/^loom_version=.*/loom_version=1.18.2/' gradle.properties
+          MC=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2 | tr -d '\r')
+          V=$(curl -fsSL https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml | grep -o "<version>[^<]*+${MC}</version>" | sed -E 's/<\/?version>//g' | sort -V | tail -n1 || true)
+          echo "FAPI=$V" >> "$GITHUB_ENV"
+          echo "$(grep '^loom_version=' gradle.properties)"
+          echo "Fabric API trovata: ${V:-nessuna (uso gradle.properties)}"
+
+      - name: Build
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          set -o pipefail
+          ARGS="--no-daemon --console=plain --stacktrace"
+          if [ -n "$FAPI" ]; then ARGS="$ARGS -Pfabric_version=$FAPI"; fi
+          gradle build $ARGS 2>&1 | tee build.log
+
+      - name: Riepilogo errori (guarda la pagina Summary della run)
+        if: failure()
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          {
+            echo "## Errori della build"
+            echo
+            echo "### Errori del compilatore"
+            echo '```'
+            grep -E -A4 ': error:' build.log | head -n 100 || true
+            echo '```'
+            echo "### Messaggio di Gradle"
+            echo '```'
+            sed -n '/What went wrong/,/\* Try:/p' build.log | head -n 40
+            echo '```'
+            echo "### Cause"
+            echo '```'
+            grep -E '^Caused by:' build.log | head -n 12 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: ${{ steps.proj.outputs.dir }}/build.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TheShadow-mod
+          path: ${{ steps.proj.outputs.dir }}/build/libs/*.jar
+          
